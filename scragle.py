@@ -23,6 +23,8 @@ This program is a scraping utility for Google search image results.
 
 google_search_base_url = "https://www.google.com/search?q={}&tbm=isch&sxsrf=APwXEdfeyuso-v9A58LJMGlpV-H5WMDh-g%3A1681104750982&source=hp&biw=1440&bih=745&ei=bp8zZI30OZidwbkP7KaEkAo&iflsig=AOEireoAAAAAZDOtfg9ww-3nh_9s_X-hlc7L7O9PlIoK&ved=0ahUKEwiN44qcy57-AhWYTjABHWwTAaIQ4dUDCAc&uact=5&oq=test&gs_lcp=CgNpbWcQAzIFCAAQgAQyBQgAEIAEMgUIABCABDIFCAAQgAQyBQgAEIAEMgUIABCABDIFCAAQgAQyBQgAEIAEMgUIABCABDIFCAAQgAQ6BAgjECdQAFitAmDnBGgAcAB4AIABWIgB3AKSAQE0mAEAoAEBqgELZ3dzLXdpei1pbWc&sclient=img"
 images_folder = os.path.join(os.getcwd(), 'images')
+if not os.path.exists(images_folder):
+    os.mkdir(images_folder)
 options = Options()
 options.add_argument('--headless')
 driver = webdriver.Chrome(service=Service(
@@ -43,14 +45,24 @@ class bcolors:
 
 def scroll(count):
     print("Scrolling page, please wait...")
-    results_per_scroll = round(count/20)
-    scroll_count = 0
-    while scroll_count < count:
-        print(f"{round(scroll_count/count*100)}% scrolled.", end='\r')
+    results_per_page = 20
+    if count < results_per_page:
         driver.execute_script(
             "window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(3)
-        scroll_count += results_per_scroll
+        return
+    scroll_times = count/results_per_page
+    if scroll_times.is_integer():
+        for i in range(int(scroll_times)):
+            driver.execute_script(
+                "window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+        return
+    scroll_times = scroll_times//results_per_page + 1
+    for i in range(scroll_times):
+        driver.execute_script(
+            "window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(3)
 
 
 def resize_image(image_path):
@@ -74,6 +86,22 @@ def get_image_from_url(url, filename, save_to_local):
         os.remove(filename)
 
 
+def get_base64_string(image_src, image_element):
+    if 'jpeg' in image_src:
+        return image_element.get_attribute(
+            'src').split('data:image/jpeg;base64,')
+    elif 'png' in image_src:
+        return image_element.get_attribute(
+            'src').split('data:image/png;base64,')
+    return None
+
+
+def write_from_base64(filename, base64_string):
+    with open(filename, 'wb') as file:
+        file.write(base64.b64decode(base64_string))
+    resize_image(filename)
+
+
 def upload_to_gcs(filename):
     gcs_client = storage.Client().from_service_account_json(
         os.environ.get("CREDENTIALS"))
@@ -91,7 +119,7 @@ def write_images(images, count, image_track, credentials=None, bucket=None):
         os.environ['BUCKET'] = bucket
     for image in images:
         print(
-            f"{bcolors.OKGREEN}Current image count: {len(image_track)} {round(len(image_track)/count*100)}% completed")
+            f"""{bcolors.OKGREEN}Current image count: {len(image_track)} {round(len(image_track)/count*100)}% completed""")
         if len(image_track) == count:
             break
         image_src = image.get_attribute('src')
@@ -101,27 +129,19 @@ def write_images(images, count, image_track, credentials=None, bucket=None):
             print(f"{bcolors.OKBLUE}Downloading: {image.get_attribute('alt')}")
             cleaned_name = re.sub(r'\W+', '', image.get_attribute('alt'))
             filename_web = os.path.join(
-                images_folder, f'{cleaned_name}')
+                images_folder, cleaned_name)
             get_image_from_url(image_src, filename_web, save_to_local)
             image_track.append(1)
             continue
-        if 'jpeg' in image_src:
-            image_b64 = image.get_attribute(
-                'src').split('data:image/jpeg;base64,')
-        elif 'png' in image_src:
-            image_b64 = image.get_attribute(
-                'src').split('data:image/png;base64,')
-        else:
-            print(image.get_attribute(
-                'src'))
+        image_b64 = get_base64_string(image_src, image)
+        if image is None:
+            continue
         file_extension = 'jpeg' if 'jpeg' in image_src else 'png'
         cleaned_name = re.sub(r'\W+', '', image.get_attribute('alt'))
         filename = os.path.join(
             images_folder, f'{cleaned_name}.{file_extension}')
         print(f"{bcolors.OKCYAN}Saving from base 64: {image.get_attribute('alt')}")
-        with open(filename, 'wb') as file:
-            file.write(base64.b64decode(image_b64[1]))
-        resize_image(filename)
+        write_from_base64(filename, image_b64[1])
         if not save_to_local:
             upload_to_gcs(filename)
             os.remove(filename)
@@ -135,18 +155,19 @@ def search_image(query, count, params, out='folder'):
     time.sleep(3)
     scroll(count)
     image_track = []
-    while True:
-        if len(image_track) == count:
-            break
-        images = driver.find_elements(by=By.CLASS_NAME, value='rg_i')
-        if len(images) == 0:
-            print("No results found.")
-            break
-        if out == 'folder':
-            write_images(images, count, image_track)
-        elif out == 'gcs':
-            write_images(images, count, image_track,
-                         params.credentials, params.bucket)
+    images = driver.find_elements(by=By.CLASS_NAME, value='rg_i')
+    if len(images) == 0:
+        print("No results found.")
+        return
+    print(f"Starting process with {len(images)} images.")
+    if out == 'folder':
+        return write_images(images, count, image_track)
+    elif out == 'gcs':
+        return write_images(
+            images, count,
+            image_track,
+            params.credentials, params.bucket
+        )
 
 
 def main():
