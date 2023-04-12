@@ -96,10 +96,13 @@ def get_base64_string(image_src, image_element):
     return None
 
 
-def write_from_base64(filename, base64_string):
+def write_from_base64(filename, base64_string, save_to_local):
     with open(filename, 'wb') as file:
         file.write(base64.b64decode(base64_string))
     resize_image(filename)
+    if not save_to_local:
+        upload_to_gcs(filename)
+        os.remove(filename)
 
 
 def upload_to_gcs(filename):
@@ -112,15 +115,17 @@ def upload_to_gcs(filename):
         filename, content_type=f'image/{file_extension}')
 
 
-def write_images(images, count, image_track, credentials=None, bucket=None):
+def write_images(images, count, credentials=None, bucket=None):
     save_to_local = credentials is None
+    image_track = 0
     if not save_to_local:
         os.environ['CREDENTIALS'] = credentials
         os.environ['BUCKET'] = bucket
     for image in images:
         print(
-            f"""{bcolors.OKGREEN}Current image count: {len(image_track)} {round(len(image_track)/count*100)}% completed""")
-        if len(image_track) == count:
+            f"""{bcolors.OKGREEN}Image count: {image_track}, {round(image_track/count*100)}% completed"""
+        )
+        if image_track == count:
             break
         image_src = image.get_attribute('src')
         if image_src is None:
@@ -128,10 +133,10 @@ def write_images(images, count, image_track, credentials=None, bucket=None):
         if 'base64' not in image_src:
             print(f"{bcolors.OKBLUE}Downloading: {image.get_attribute('alt')}")
             cleaned_name = re.sub(r'\W+', '', image.get_attribute('alt'))
-            filename_web = os.path.join(
+            filename = os.path.join(
                 images_folder, cleaned_name)
-            get_image_from_url(image_src, filename_web, save_to_local)
-            image_track.append(1)
+            get_image_from_url(image_src, filename, save_to_local)
+            image_track += 1
             continue
         image_b64 = get_base64_string(image_src, image)
         if image is None:
@@ -141,32 +146,28 @@ def write_images(images, count, image_track, credentials=None, bucket=None):
         filename = os.path.join(
             images_folder, f'{cleaned_name}.{file_extension}')
         print(f"{bcolors.OKCYAN}Saving from base 64: {image.get_attribute('alt')}")
-        write_from_base64(filename, image_b64[1])
-        if not save_to_local:
-            upload_to_gcs(filename)
-            os.remove(filename)
-        image_track.append(1)
+        write_from_base64(filename, image_b64[1], save_to_local)
+        image_track += 1
 
 
-def search_image(query, count, params, out='folder'):
+def scragle(query, count, params, out='folder'):
     full_url = google_search_base_url.format(query)
     driver.get(full_url)
     driver.maximize_window()
     time.sleep(3)
     scroll(count)
-    image_track = []
     images = driver.find_elements(by=By.CLASS_NAME, value='rg_i')
     if len(images) == 0:
         print("No results found.")
         return
     print(f"Starting process with {len(images)} images.")
     if out == 'folder':
-        return write_images(images, count, image_track)
+        return write_images(images, count)
     elif out == 'gcs':
         return write_images(
             images, count,
-            image_track,
-            params.credentials, params.bucket
+            params.credentials,
+            params.bucket
         )
 
 
@@ -184,7 +185,7 @@ def main():
     parser.add_argument("--bucket", type=str, default=None)
     args = parser.parse_args()
     if args.out == 'folder':
-        search_image(args.query, args.count, args, args.out)
+        scragle(args.query, args.count, args, args.out)
     elif args.out == 'gcs':
         if args.credentials is None and args.bucket is None:
             raise Exception(
@@ -193,7 +194,7 @@ def main():
                     when using GCS as out parameter.
                 """
             )
-        search_image(args.query, args.count, args, args.out)
+        scragle(args.query, args.count, args, args.out)
 
 
 if __name__ == "__main__":
