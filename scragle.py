@@ -14,7 +14,7 @@ import re
 import urllib.request
 import requests
 from google.cloud import storage
-
+import traceback
 
 """
 SCRAGLE\n
@@ -45,23 +45,21 @@ class bcolors:
 
 def scroll(count):
     print("Scrolling page, please wait...")
+    scroll_script = "window.scrollTo(0, document.body.scrollHeight);"
     results_per_page = 20
     if count < results_per_page:
-        driver.execute_script(
-            "window.scrollTo(0, document.body.scrollHeight);")
+        driver.execute_script(scroll_script)
         time.sleep(3)
         return
     scroll_times = count/results_per_page
     if scroll_times.is_integer():
         for i in range(int(scroll_times)):
-            driver.execute_script(
-                "window.scrollTo(0, document.body.scrollHeight);")
+            driver.execute_script(scroll_script)
             time.sleep(3)
         return
-    scroll_times = scroll_times//results_per_page + 1
+    scroll_times = int(scroll_times) + 1
     for i in range(scroll_times):
-        driver.execute_script(
-            "window.scrollTo(0, document.body.scrollHeight);")
+        driver.execute_script(scroll_script)
         time.sleep(3)
 
 
@@ -129,6 +127,7 @@ def write_images(images, count, credentials=None, bucket=None):
             break
         image_src = image.get_attribute('src')
         if image_src is None:
+            print("Empty src attribute, skipping.")
             continue
         if 'base64' not in image_src:
             print(f"{bcolors.OKBLUE}Downloading: {image.get_attribute('alt')}")
@@ -151,24 +150,27 @@ def write_images(images, count, credentials=None, bucket=None):
 
 
 def scragle(query, count, params, out='folder'):
-    full_url = google_search_base_url.format(query)
-    driver.get(full_url)
-    driver.maximize_window()
-    time.sleep(3)
-    scroll(count)
-    images = driver.find_elements(by=By.CLASS_NAME, value='rg_i')
-    if len(images) == 0:
-        print("No results found.")
-        return
-    print(f"Starting process with {len(images)} images.")
-    if out == 'folder':
-        return write_images(images, count)
-    elif out == 'gcs':
-        return write_images(
-            images, count,
-            params.credentials,
-            params.bucket
-        )
+    try:
+        full_url = google_search_base_url.format(query)
+        driver.get(full_url)
+        driver.maximize_window()
+        time.sleep(3)
+        scroll(count)
+        images = driver.find_elements(by=By.CLASS_NAME, value='rg_i')
+        if len(images) == 0:
+            print("No results found.")
+            return
+        print(f"Starting process with {len(images)} images.")
+        if out == 'folder':
+            return write_images(images, count)
+        elif out == 'gcs':
+            return write_images(
+                images, count,
+                params.credentials,
+                params.bucket
+            )
+    except Exception:
+        raise Exception(traceback.format_exc())
 
 
 def main():
@@ -190,8 +192,8 @@ def main():
         if args.credentials is None and args.bucket is None:
             raise Exception(
                 """
-                    Credentials and bucket must be specified
-                    when using GCS as out parameter.
+                Credentials and bucket must be specified
+                when using GCS as out parameter.
                 """
             )
         scragle(args.query, args.count, args, args.out)
