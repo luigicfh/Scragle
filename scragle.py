@@ -23,7 +23,7 @@ SCRAGLE\n
 This program is a scraping utility for Google search image results.
 """
 
-google_search_base_url = "https://www.google.com/search?q={}&tbm=isch&sxsrf=APwXEdfeyuso-v9A58LJMGlpV-H5WMDh-g%3A1681104750982&source=hp&biw=1440&bih=745&ei=bp8zZI30OZidwbkP7KaEkAo&iflsig=AOEireoAAAAAZDOtfg9ww-3nh_9s_X-hlc7L7O9PlIoK&ved=0ahUKEwiN44qcy57-AhWYTjABHWwTAaIQ4dUDCAc&uact=5&oq=test&gs_lcp=CgNpbWcQAzIFCAAQgAQyBQgAEIAEMgUIABCABDIFCAAQgAQyBQgAEIAEMgUIABCABDIFCAAQgAQyBQgAEIAEMgUIABCABDIFCAAQgAQ6BAgjECdQAFitAmDnBGgAcAB4AIABWIgB3AKSAQE0mAEAoAEBqgELZ3dzLXdpei1pbWc&sclient=img"
+
 images_folder = os.path.join(os.getcwd(), 'images')
 if not os.path.exists(images_folder):
     os.mkdir(images_folder)
@@ -213,17 +213,32 @@ def write_images(images, count, credentials=None, bucket=None, quality='low'):
             thumbnail = fetch_sd_quality_image(image)
             image_track = get_image(thumbnail, save_to_local, image_track)
 
-def scragle(query, count, params, out='folder'):
+def ready_page(url, count):
+    driver.get(url)
+    driver.maximize_window()
+    time.sleep(3)
+    scroll(count)
+    print("Page ready...")
+
+def scragle(count, params, out='folder'):
     try:
-        full_url = google_search_base_url.format(query)
-        driver.get(full_url)
-        driver.maximize_window()
-        time.sleep(3)
-        scroll(count)
-        print("Page ready...")
+        full_url = input(
+            """Paste the Google Search Images result URL: """
+        )
+        if not full_url or not is_valid_url(full_url):
+            raise ValueError(
+                """The value provided is not valid."""
+            )
+        ready_page(full_url, count)
         small_thumbnail_class = input(
             """Paste the class name for the small thumbnail elements: """
         )
+        if not small_thumbnail_class:
+            raise ValueError(
+                """
+                Please provide a valid value.
+                """
+            )
         images = get_elements(small_thumbnail_class.strip())
         if images is None:
             print(
@@ -236,6 +251,12 @@ def scragle(query, count, params, out='folder'):
             sd_quality_images_class = input(
                 """Paste the class name for the modal image element: """
             )
+            if not sd_quality_images_class:
+                raise ValueError(
+                    """
+                    Please provide a valid value.
+                    """
+                )
             os.environ["SD_IMAGE_CLASS"] = sd_quality_images_class.strip()
         if out == 'folder':
             return write_images(
@@ -262,7 +283,6 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--query", type=str, required=True)
     parser.add_argument("--count", type=int, required=True)
     parser.add_argument("--imagequality", type=str, default='low', 
                         choices=['low', 'sd'])
@@ -273,7 +293,7 @@ def main():
     parser.add_argument("--bucket", type=str, default=None)
     args = parser.parse_args()
     if args.out == 'folder':
-        scragle(args.query, args.count, args, args.out)
+        scragle(args.count, args, args.out)
     elif args.out == 'gcs':
         if args.credentials is None and args.bucket is None:
             raise Exception(
@@ -282,7 +302,7 @@ def main():
                 when using GCS as out parameter.
                 """
             )
-        scragle(args.query, args.count, args, args.out)
+        scragle(args.count, args, args.out)
 
 
 if __name__ == "__main__":

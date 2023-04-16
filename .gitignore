@@ -152,3 +152,4 @@ cython_debug/
 #.idea/
 *.json
 /images
+.DS_Store
