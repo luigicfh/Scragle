@@ -6,15 +6,17 @@ import base64
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.chrome.options import Options
-import time
 from selenium.webdriver.common.by import By
+import time
 from PIL import Image
 import re
 import urllib.request
 import requests
 from google.cloud import storage
 import traceback
+import uuid
 
 """
 SCRAGLE\n
@@ -25,6 +27,9 @@ google_search_base_url = "https://www.google.com/search?q={}&tbm=isch&sxsrf=APwX
 images_folder = os.path.join(os.getcwd(), 'images')
 if not os.path.exists(images_folder):
     os.mkdir(images_folder)
+js_folder = os.path.join(os.getcwd(), 'js')
+with open(os.path.join(js_folder, 'scroll.js')) as file:
+    scroll_script = file.read()
 options = Options()
 options.add_argument('--headless')
 driver = webdriver.Chrome(service=Service(
@@ -45,7 +50,6 @@ class bcolors:
 
 def scroll(count):
     print("Scrolling page, please wait...")
-    scroll_script = "window.scrollTo(0, document.body.scrollHeight);"
     results_per_page = 20
     if count < results_per_page:
         driver.execute_script(scroll_script)
@@ -64,24 +68,45 @@ def scroll(count):
 
 
 def resize_image(image_path):
+    standard_quality_images = os.environ.get("IMG_QUALITY") == 'sd'
+    if standard_quality_images:
+        return
+    print("Resizing...")
     image = Image.open(image_path).convert('RGB')
     output_size = (image.width * 3, image.height * 3)
     resized_image = image.resize(output_size, resample=Image.LANCZOS)
     resized_image.save(image_path)
 
+def set_request_headers():
+    return {
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'accept-encoding': 'gzip, deflate, br',
+        'accept-language': 'en-US,en;q=0.8',
+        'upgrade-insecure-requests': '1',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36'
+    }
 
 def get_image_from_url(url, filename, save_to_local):
-    response = requests.get(url)
+    headers = set_request_headers()
+    standard_quality_images = os.environ.get("IMG_QUALITY") != 'low'
+    response = requests.get(url, headers=headers)
     content_type = response.headers.get('Content-Type')
     print(
         f"Content-Type: {content_type}, status code: {response.status_code}")
-    file_extension = content_type.split('/')[-1]
+    if content_type is not None:
+        file_extension = content_type.split('/')[-1]
+    else:
+        file_extension = 'jpeg'
     filename = f'{filename}.{file_extension}'
-    urllib.request.urlretrieve(url, filename)
-    resize_image(filename)
-    if not save_to_local:
-        upload_to_gcs(filename)
-        os.remove(filename)
+    if not standard_quality_images:
+        urllib.request.urlretrieve(url, filename)
+        resize_image(filename)
+        if not save_to_local:
+            upload_to_gcs(filename)
+            os.remove(filename)
+    else:
+        with open(filename, 'wb') as file:
+            file.write(response.content)
 
 
 def get_base64_string(image_src, image_element):
@@ -111,43 +136,60 @@ def upload_to_gcs(filename):
     file_extension = 'jpeg' if 'jpeg' in filename else 'png'
     blob.upload_from_filename(
         filename, content_type=f'image/{file_extension}')
+    
+def get_image(image, save_to_local, image_track):
+    image_src = image.get_attribute('src')
+    if image_src is None:
+        print("Empty src attribute, skipping.")
+        return image_track
+    if 'base64' not in image_src:
+        print(f"{bcolors.OKBLUE}Downloading: {image.get_attribute('alt')}")
+        cleaned_name = re.sub(r'\W+', '', image.get_attribute('alt')) + str(uuid.uuid4())
+        filename = os.path.join(
+            images_folder, cleaned_name)
+        get_image_from_url(image_src, filename, save_to_local)
+        image_track += 1
+        return image_track
+    image_b64 = get_base64_string(image_src, image)
+    file_extension = 'jpeg' if 'jpeg' in image_src else 'png'
+    cleaned_name = re.sub(r'\W+', '', image.get_attribute('alt'))
+    filename = os.path.join(
+        images_folder, f'{cleaned_name + str(uuid.uuid4())}.{file_extension}')
+    print(f"{bcolors.OKCYAN}Saving from base 64: {image.get_attribute('alt')}")
+    write_from_base64(filename, image_b64[1], save_to_local)
+    image_track += 1
+    return image_track
 
+def get_element(class_name):
+    elements = driver.find_elements(by=By.CLASS_NAME, value=class_name)
+    if len(elements) == 0:
+        return None
+    return elements[0]
 
-def write_images(images, count, credentials=None, bucket=None):
+def write_images(images, count, credentials=None, bucket=None, quality='low'):
     save_to_local = credentials is None
     image_track = 0
     if not save_to_local:
         os.environ['CREDENTIALS'] = credentials
         os.environ['BUCKET'] = bucket
+    os.environ["QUALITY"] = quality
     for image in images:
         print(
             f"""{bcolors.OKGREEN}Image count: {image_track}, {round(image_track/count*100)}% completed"""
         )
         if image_track == count:
             break
-        image_src = image.get_attribute('src')
-        if image_src is None:
-            print("Empty src attribute, skipping.")
-            continue
-        if 'base64' not in image_src:
-            print(f"{bcolors.OKBLUE}Downloading: {image.get_attribute('alt')}")
-            cleaned_name = re.sub(r'\W+', '', image.get_attribute('alt'))
-            filename = os.path.join(
-                images_folder, cleaned_name)
-            get_image_from_url(image_src, filename, save_to_local)
-            image_track += 1
-            continue
-        image_b64 = get_base64_string(image_src, image)
-        if image is None:
-            continue
-        file_extension = 'jpeg' if 'jpeg' in image_src else 'png'
-        cleaned_name = re.sub(r'\W+', '', image.get_attribute('alt'))
-        filename = os.path.join(
-            images_folder, f'{cleaned_name}.{file_extension}')
-        print(f"{bcolors.OKCYAN}Saving from base 64: {image.get_attribute('alt')}")
-        write_from_base64(filename, image_b64[1], save_to_local)
-        image_track += 1
-
+        if quality != 'sd':
+            image_track = get_image(image, save_to_local, image_track)
+        else:
+            image.click()
+            time.sleep(4)
+            larger_thumbnail = get_element('iPVvYb')
+            if not larger_thumbnail:
+                print("This element does not posses a higher quality image.")
+                print("Fetching low quality image...")
+            thumbmail = larger_thumbnail if larger_thumbnail else image
+            image_track = get_image(thumbmail, save_to_local, image_track)
 
 def scragle(query, count, params, out='folder'):
     try:
@@ -161,13 +203,23 @@ def scragle(query, count, params, out='folder'):
             print("No results found.")
             return
         print(f"Starting process with {len(images)} images.")
+        if params.imagequality == 'sd':
+            print("Standard quality images will take longer to fetch...")
         if out == 'folder':
-            return write_images(images, count)
+            return write_images(
+                images, 
+                count, 
+                params.credentials, 
+                params.bucket, 
+                params.imagequality
+            )
         elif out == 'gcs':
             return write_images(
-                images, count,
+                images, 
+                count,
                 params.credentials,
-                params.bucket
+                params.bucket,
+                params.imagequality
             )
     except Exception:
         raise Exception(traceback.format_exc())
@@ -180,6 +232,8 @@ def main():
     )
     parser.add_argument("--query", type=str, required=True)
     parser.add_argument("--count", type=int, required=True)
+    parser.add_argument("--imagequality", type=str, default='low', 
+                        choices=['low', 'sd'])
     parser.add_argument("--out", type=str, default='folder',
                         choices=['folder', 'gcs'])
     parser.add_argument("--credentials", type=str, default=None,
