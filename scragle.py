@@ -6,13 +6,13 @@ import base64
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 import time
 from PIL import Image
 import re
 import urllib.request
+from urllib.parse import urlparse
 import requests
 from google.cloud import storage
 import traceback
@@ -90,10 +90,17 @@ def get_image_from_url(url, filename, save_to_local):
     headers = set_request_headers()
     standard_quality_images = os.environ.get("IMG_QUALITY") != 'low'
     response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        print(
+        f"""Skipping due to invalid response from server: {response.status_code}\n
+        URL: {url}""")
+        return
     content_type = response.headers.get('Content-Type')
     print(
         f"Content-Type: {content_type}, status code: {response.status_code}")
-    if content_type is not None:
+    if 'webp' in content_type:
+        file_extension = 'jpeg'
+    elif content_type is not None:
         file_extension = content_type.split('/')[-1]
     else:
         file_extension = 'jpeg'
@@ -101,12 +108,12 @@ def get_image_from_url(url, filename, save_to_local):
     if not standard_quality_images:
         urllib.request.urlretrieve(url, filename)
         resize_image(filename)
-        if not save_to_local:
-            upload_to_gcs(filename)
-            os.remove(filename)
     else:
         with open(filename, 'wb') as file:
             file.write(response.content)
+    if not save_to_local:
+        upload_to_gcs(filename)
+        os.remove(filename)
 
 
 def get_base64_string(image_src, image_element):
@@ -136,7 +143,32 @@ def upload_to_gcs(filename):
     file_extension = 'jpeg' if 'jpeg' in filename else 'png'
     blob.upload_from_filename(
         filename, content_type=f'image/{file_extension}')
-    
+
+def is_valid_url(url):
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
+
+def get_elements(class_name):
+    elements = driver.find_elements(by=By.CLASS_NAME, value=class_name)
+    if len(elements) == 0:
+        return None
+    return elements
+
+def fetch_sd_quality_image(image):
+    sd_image_class_name = os.environ.get("SD_IMAGE_CLASS")
+    larger_thumbnail = get_elements(sd_image_class_name)
+    if larger_thumbnail is None:
+        print("This element does not posses a higher quality image.")
+        print("Fetching low quality image...")
+        return image
+    https_image_element = [
+    image_element for image_element in larger_thumbnail if is_valid_url(image_element.get_attribute('src'))
+    ]
+    return https_image_element[0] if len(https_image_element) == 1 else image 
+
 def get_image(image, save_to_local, image_track):
     image_src = image.get_attribute('src')
     if image_src is None:
@@ -160,12 +192,6 @@ def get_image(image, save_to_local, image_track):
     image_track += 1
     return image_track
 
-def get_element(class_name):
-    elements = driver.find_elements(by=By.CLASS_NAME, value=class_name)
-    if len(elements) == 0:
-        return None
-    return elements[0]
-
 def write_images(images, count, credentials=None, bucket=None, quality='low'):
     save_to_local = credentials is None
     image_track = 0
@@ -179,17 +205,13 @@ def write_images(images, count, credentials=None, bucket=None, quality='low'):
         )
         if image_track == count:
             break
-        if quality != 'sd':
+        if quality == 'low':
             image_track = get_image(image, save_to_local, image_track)
         else:
             image.click()
-            time.sleep(4)
-            larger_thumbnail = get_element('iPVvYb')
-            if not larger_thumbnail:
-                print("This element does not posses a higher quality image.")
-                print("Fetching low quality image...")
-            thumbmail = larger_thumbnail if larger_thumbnail else image
-            image_track = get_image(thumbmail, save_to_local, image_track)
+            time.sleep(3)
+            thumbnail = fetch_sd_quality_image(image)
+            image_track = get_image(thumbnail, save_to_local, image_track)
 
 def scragle(query, count, params, out='folder'):
     try:
@@ -198,13 +220,23 @@ def scragle(query, count, params, out='folder'):
         driver.maximize_window()
         time.sleep(3)
         scroll(count)
-        images = driver.find_elements(by=By.CLASS_NAME, value='rg_i')
-        if len(images) == 0:
-            print("No results found.")
+        print("Page ready...")
+        small_thumbnail_class = input(
+            """Paste the class name for the small thumbnail elements: """
+        )
+        images = get_elements(small_thumbnail_class.strip())
+        if images is None:
+            print(
+            f"Elements with class name {small_thumbnail_class} not found.")
+            print("Exiting...")
             return
         print(f"Starting process with {len(images)} images.")
         if params.imagequality == 'sd':
             print("Standard quality images will take longer to fetch...")
+            sd_quality_images_class = input(
+                """Paste the class name for the modal image element: """
+            )
+            os.environ["SD_IMAGE_CLASS"] = sd_quality_images_class.strip()
         if out == 'folder':
             return write_images(
                 images, 
