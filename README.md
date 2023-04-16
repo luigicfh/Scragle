@@ -15,7 +15,7 @@ cd google_images_scraper
 ```
 
 ```python
-pip install 
+pip install .
 ```
 
 ## Usage
